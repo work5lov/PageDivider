@@ -5,6 +5,8 @@ from PyQt6.QtCore import QObject, pyqtSlot, pyqtSignal
 from PyQt6.QtWidgets import QFileDialog
 import re
 from pathlib import Path
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 
 class PDFImageProcessor(QObject):
     message_signal = pyqtSignal(str)
@@ -12,14 +14,15 @@ class PDFImageProcessor(QObject):
     def __init__(self):
         super().__init__()
         self.pdf_path = ""
+        self.base_filename = ""  # Добавлено для хранения имени файла без расширения
 
     @pyqtSlot()
     def select_pdf_file(self):
         file_name, _ = QFileDialog.getOpenFileName(None, "Выберите PDF файл", "", "PDF Files (*.pdf);;All Files (*)")
         if file_name:
-            file_name_only = os.path.basename(file_name)
             self.pdf_path = file_name
-            self.message_signal.emit(f"Файл выбран: {file_name_only}")
+            self.base_filename = os.path.splitext(os.path.basename(file_name))[0]  # Сохранение имени файла без расширения
+            self.message_signal.emit(f"Файл выбран: {self.base_filename}.pdf")
         else:
             self.message_signal.emit("Файл не выбран.")
 
@@ -33,17 +36,36 @@ class PDFImageProcessor(QObject):
 
         self.remove_hyperlinks_and_save_as_png(self.pdf_path)
 
-        base_filename = os.path.splitext(os.path.basename(self.pdf_path))[0]
         output_folder = os.path.dirname(self.pdf_path)
 
         for page_number in range(3):  # Можно динамически получить количество страниц
-            image_name = os.path.join(output_folder, f"{base_filename}_{page_number + 1}.png")
+            image_name = os.path.normpath(os.path.join(output_folder, f"{self.base_filename}_{page_number + 1}.png"))
             self.split_images(image_name, output_folder)
 
-        parts_folder = os.path.join(output_folder, f"страницы по частям_{base_filename}")
-        self.combine_images_to_pdf(parts_folder)
+        parts_folder = os.path.join(output_folder, f"{self.base_filename} страницы по частям")
+        
+        # Работа с изображениями
+        image_files = []
+        try:
+            for f in os.listdir(parts_folder):
+                if f.endswith('.png'):
+                    image_file_path = Path(parts_folder) / f
+                    image_files.append(str(image_file_path))
+        except Exception as e:
+            self.message_signal.emit(f"Ошибка при получении изображений: {str(e)}")
+            return
 
-        self.message_signal.emit("Обработка завершена.")
+        if not image_files:
+            self.message_signal.emit("Нет изображений для объединения в PDF.")
+            return
+
+        output_pdf = str(Path(output_folder) / f"{self.base_filename}_combined.pdf")
+        
+        try:
+            self.combine_images_to_pdf(image_files, output_pdf)
+            self.message_signal.emit("Обработка завершена.")
+        except Exception as e:
+            self.message_signal.emit(f"Ошибка при создании PDF: {str(e)}")
 
     def remove_hyperlinks_and_save_as_png(self, pdf_path):
         doc = fitz.open(pdf_path)
@@ -68,8 +90,14 @@ class PDFImageProcessor(QObject):
         return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
     def split_images(self, image_name, output_folder, target_width_mm=297, max_remainder_mm=100):
-        parts_folder = os.path.join(output_folder, "страницы по частям")
+        parts_folder = os.path.join(output_folder, f"{self.base_filename} страницы по частям")
         os.makedirs(parts_folder, exist_ok=True)
+
+        image_name = os.path.normpath(image_name)  # Нормализация пути
+
+        if not os.path.exists(image_name):
+            self.message_signal.emit(f"Файл не найден: {image_name}")
+            return
 
         img = Image.open(image_name)
         img_width, img_height = img.size
@@ -95,24 +123,13 @@ class PDFImageProcessor(QObject):
 
         self.message_signal.emit(f"{image_name} разделено на {num_parts} частей.")
 
-#from pathlib import Path
-
-    def combine_images_to_pdf(self, parts_folder):
-        # Преобразуем строку пути в объект Path
-        parts_folder_path = Path(parts_folder)
-        images = [img for img in parts_folder_path.glob("*.png")]
-        images.sort()  # Сортируем файлы по имени, чтобы сохранить порядок
-
-        # Извлекаем имя базового файла
-        base_filename = parts_folder_path.name.replace("страницы по частям_", "")
-        pdf_filename = parts_folder_path / f"{base_filename}_частями.pdf"
-
-        images_to_convert = []
-
-        for img in images:
-            images_to_convert.append(Image.open(img))
-
-        if images_to_convert:
-            images_to_convert[0].save(pdf_filename, save_all=True, append_images=images_to_convert[1:])
-            self.message_signal.emit(f"Сохранен PDF файл: {pdf_filename}")
-
+    def combine_images_to_pdf(self, image_files, output_pdf):
+        try:
+            images = [Image.open(image_file) for image_file in image_files]
+            if images:
+                images[0].save(output_pdf, save_all=True, append_images=images[1:])
+                self.message_signal.emit(f"Создан PDF: {output_pdf}")
+            else:
+                self.message_signal.emit("Нет изображений для объединения в PDF.")
+        except Exception as e:
+            self.message_signal.emit(f"Ошибка при создании PDF: {str(e)}")
